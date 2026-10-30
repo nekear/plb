@@ -1,0 +1,665 @@
+stages:
+    normalize:
+        cmd: uv run -m plb.normalize --release-dir data/release --output-dir data/interim
+        deps:
+            - data/release
+            - src/plb/normalize/__main__.py
+            - src/plb/normalize/process.py
+            - src/plb/normalize/readings.py
+            - src/plb/normalize/extractors.py
+            - src/plb/normalize/helpers.py
+            - src/plb/normalize/schema.py
+        outs:
+            - data/interim/users.jsonl
+            - data/interim/decks.jsonl
+            - data/interim/lexemes.jsonl
+            - data/interim/word_instances.jsonl
+            - data/interim/reviews.jsonl
+
+    clean_reviews:
+        cmd: uv run -m plb.reviews.clean_reviews
+        deps:
+            - data/interim/reviews.jsonl
+            - src/plb/reviews/clean_reviews.py
+        outs:
+            - data/processed/clean_reviews.jsonl
+
+    replay_reviews_fsrs:
+        cmd: uv run -m plb.reviews.replay_fsrs
+        deps:
+            - data/interim/decks.jsonl
+            - data/interim/word_instances.jsonl
+            - data/processed/clean_reviews.jsonl
+            - src/plb/reviews/replay_fsrs.py
+        outs:
+            - data/processed/clean_reviews_w_fsrs.jsonl
+
+    calculate_stability_targets:
+        cmd: uv run -m plb.reviews.calculate_stability_targets
+        deps:
+            - data/interim/word_instances.jsonl
+            - data/processed/clean_reviews_w_fsrs.jsonl
+            - src/plb/reviews/calculate_stability_targets.py
+        outs:
+            - data/processed/word_instances_w_stability_targets.jsonl
+
+    embed_word_instances_direct:
+        cmd: uv run --extra train -m plb.embeddings.direct
+        deps:
+            - ${embeddings.direct.word_instances_path}
+            - src/plb/embeddings/direct/config.py
+            - src/plb/embeddings/direct/__main__.py
+            - src/plb/utils.py
+        params:
+            - embeddings.direct
+        outs:
+            - ${embeddings.direct.output_path}
+
+    # Scoring is the expensive half and depends on no selection setting, so it
+    # is deliberately kept free of percentiles/top_k/calibration params: retuning any
+    # of those must re-run only select_similarity_neighbors.
+    score_similarity_pairs:
+        cmd: uv run -m plb.similarities.score_pairs
+        deps:
+            - data/interim/decks.jsonl
+            - data/interim/lexemes.jsonl
+            - ${embeddings.direct.output_path}
+            - data/processed/word_instances_w_stability_targets.jsonl
+            - data/raw/esm/12144_2021_2664_MOESM1_ESM.xlsx
+            - data/raw/niteru/stroke_ulrich.txt
+            - src/plb/esm/kana_confusability.py
+            - src/plb/niteru/niteru.py
+            - src/plb/cohort.py
+            - src/plb/learners.py
+            - src/plb/similarities/cache.py
+            - src/plb/similarities/config.py
+            - src/plb/similarities/morphological.py
+            - src/plb/similarities/orthographic.py
+            - src/plb/similarities/phonological.py
+            - src/plb/similarities/pipeline.py
+            - src/plb/similarities/score_pairs.py
+            - src/plb/similarities/semantic.py
+            - src/plb/similarities/types.py
+        params:
+            - cohort
+            - similarities.cache
+            - similarities.workers
+            - similarities.target_chunk_size
+        outs:
+            - ${similarities.cache.path}:
+                  persist: true
+
+    select_similarity_neighbors:
+        cmd: uv run -m plb.similarities.select_neighbors
+        deps:
+            - data/interim/decks.jsonl
+            - data/interim/lexemes.jsonl
+            - data/processed/clean_reviews_w_fsrs.jsonl
+            - data/processed/word_instances_w_stability_targets.jsonl
+            - ${similarities.cache.path}
+            - src/plb/cohort.py
+            - src/plb/learners.py
+            - src/plb/similarities/cache.py
+            - src/plb/similarities/calibration.py
+            - src/plb/similarities/config.py
+            - src/plb/similarities/pipeline.py
+            - src/plb/similarities/select_neighbors.py
+            - src/plb/similarities/types.py
+        params:
+            - cohort
+            - similarities.cache
+            - similarities.percentiles
+            - similarities.calibration
+            - similarities.top_k
+        outs:
+            - data/processed/similarities.jsonl
+            - data/processed/randomities.jsonl
+            - ${similarities.calibration.output_path}
+
+    create_model_b_splits:
+        cmd: uv run -m plb.model_b.preparation.create_splits
+        deps:
+            - data/interim/decks.jsonl
+            - data/interim/lexemes.jsonl
+            - data/processed/word_instances_w_stability_targets.jsonl
+            - src/plb/cohort.py
+            - src/plb/learners.py
+            - src/plb/model_b/config.py
+            - src/plb/model_b/preparation/create_splits.py
+        params:
+            - cohort
+            - model_b.splits
+        outs:
+            - data/processed/model_b/train_word_instances.jsonl
+            - data/processed/model_b/eval_word_instances.jsonl
+            - data/processed/model_b/test_word_instances.jsonl
+
+    train_model_b_global_median:
+        cmd: uv run -m plb.model_b.ablations.train global_median
+        deps:
+            - data/processed/model_b/eval_word_instances.jsonl
+            - data/processed/model_b/train_word_instances.jsonl
+            - src/plb/model_b/ablations/dummy.py
+            - src/plb/model_b/ablations/registry.py
+            - src/plb/model_b/ablations/train.py
+            - src/plb/model_b/config.py
+            - src/plb/model_b/core/base.py
+            - src/plb/model_b/core/data.py
+            - src/plb/model_b/preparation/create_splits.py
+        params:
+            - model_b.ablations.models.global_median
+        outs:
+            - models/model_b/ablations/global_median/model.json
+
+    train_model_b_within_learner_median:
+        cmd: uv run -m plb.model_b.ablations.train within_learner_median
+        deps:
+            - data/processed/model_b/eval_word_instances.jsonl
+            - data/processed/model_b/train_word_instances.jsonl
+            - src/plb/model_b/ablations/dummy.py
+            - src/plb/model_b/ablations/registry.py
+            - src/plb/model_b/ablations/train.py
+            - src/plb/model_b/config.py
+            - src/plb/model_b/core/base.py
+            - src/plb/model_b/core/data.py
+            - src/plb/model_b/preparation/create_splits.py
+        params:
+            - model_b.ablations.models.within_learner_median
+        outs:
+            - models/model_b/ablations/within_learner_median/model.json
+
+    train_model_b_learner_recent_k_median:
+        cmd: uv run -m plb.model_b.ablations.train learner_recent_k_median
+        deps:
+            - data/processed/model_b/eval_word_instances.jsonl
+            - data/processed/model_b/train_word_instances.jsonl
+            - src/plb/model_b/ablations/dummy.py
+            - src/plb/model_b/ablations/registry.py
+            - src/plb/model_b/ablations/train.py
+            - src/plb/model_b/config.py
+            - src/plb/model_b/core/base.py
+            - src/plb/model_b/core/data.py
+            - src/plb/model_b/preparation/create_splits.py
+        params:
+            - model_b.ablations.models.learner_recent_k_median
+        outs:
+            - models/model_b/ablations/learner_recent_k_median/model.json
+
+    train_model_b_gbdt_no_nbrs:
+        cmd: uv run -m plb.model_b.ablations.train gbdt_no_nbrs
+        deps:
+            - data/interim/lexemes.jsonl
+            - data/processed/model_b/eval_word_instances.jsonl
+            - data/processed/model_b/train_word_instances.jsonl
+            - data/processed/word_instances_kvl_predictions.jsonl
+            - data/raw/tubelex/${tubelex.file_name}
+            - src/plb/model_b/ablations/gbdt.py
+            - src/plb/model_b/ablations/registry.py
+            - src/plb/model_b/ablations/train.py
+            - src/plb/model_b/config.py
+            - src/plb/model_b/core/base.py
+            - src/plb/model_b/core/data.py
+            - src/plb/model_b/core/features.py
+            - src/plb/model_b/preparation/create_splits.py
+            - src/plb/tubelex/config.py
+        params:
+            - model_b.ablations.models.gbdt_no_nbrs
+            - tubelex.file_name
+        outs:
+            - models/model_b/ablations/gbdt_no_nbrs/model.json
+            - models/model_b/ablations/gbdt_no_nbrs/state.json
+
+    train_model_b_gbdt_w_nbrs:
+        cmd: uv run -m plb.model_b.ablations.train gbdt_w_nbrs
+        deps:
+            - data/interim/lexemes.jsonl
+            - data/processed/model_b/eval_word_instances.jsonl
+            - data/processed/model_b/train_word_instances.jsonl
+            - data/processed/similarities.jsonl
+            - data/processed/word_instances_kvl_predictions.jsonl
+            - data/raw/tubelex/${tubelex.file_name}
+            - src/plb/model_b/ablations/gbdt.py
+            - src/plb/model_b/ablations/registry.py
+            - src/plb/model_b/ablations/train.py
+            - src/plb/model_b/config.py
+            - src/plb/model_b/core/base.py
+            - src/plb/model_b/core/data.py
+            - src/plb/model_b/core/features.py
+            - src/plb/model_b/preparation/create_splits.py
+            - src/plb/tubelex/config.py
+        params:
+            - model_b.ablations.models.gbdt_w_nbrs
+            - tubelex.file_name
+        outs:
+            - models/model_b/ablations/gbdt_w_nbrs/model.json
+            - models/model_b/ablations/gbdt_w_nbrs/state.json
+
+    train_model_b_gbdt_w_nbrs_random:
+        cmd: uv run -m plb.model_b.ablations.train gbdt_w_nbrs_random
+        deps:
+            - data/interim/lexemes.jsonl
+            - data/processed/model_b/eval_word_instances.jsonl
+            - data/processed/model_b/train_word_instances.jsonl
+            - data/processed/randomities.jsonl
+            - data/processed/word_instances_kvl_predictions.jsonl
+            - data/raw/tubelex/${tubelex.file_name}
+            - src/plb/model_b/ablations/gbdt.py
+            - src/plb/model_b/ablations/registry.py
+            - src/plb/model_b/ablations/train.py
+            - src/plb/model_b/config.py
+            - src/plb/model_b/core/base.py
+            - src/plb/model_b/core/data.py
+            - src/plb/model_b/core/features.py
+            - src/plb/model_b/preparation/create_splits.py
+            - src/plb/tubelex/config.py
+        params:
+            - model_b.ablations.models.gbdt_w_nbrs_random
+            - tubelex.file_name
+        outs:
+            - models/model_b/ablations/gbdt_w_nbrs_random/model.json
+            - models/model_b/ablations/gbdt_w_nbrs_random/state.json
+
+    train_model_b_gbdt_w_nbrs_censored:
+        cmd: uv run -m plb.model_b.ablations.train gbdt_w_nbrs_censored
+        deps:
+            - data/interim/lexemes.jsonl
+            - data/processed/model_b/eval_word_instances.jsonl
+            - data/processed/model_b/train_word_instances.jsonl
+            - data/processed/similarities.jsonl
+            - data/processed/word_instances_kvl_predictions.jsonl
+            - data/raw/tubelex/${tubelex.file_name}
+            - src/plb/model_b/ablations/gbdt.py
+            - src/plb/model_b/ablations/registry.py
+            - src/plb/model_b/ablations/train.py
+            - src/plb/model_b/config.py
+            - src/plb/model_b/core/base.py
+            - src/plb/model_b/core/data.py
+            - src/plb/model_b/core/features.py
+            - src/plb/model_b/preparation/create_splits.py
+            - src/plb/tubelex/config.py
+        params:
+            - model_b.ablations.models.gbdt_w_nbrs_censored
+            - tubelex.file_name
+        outs:
+            - models/model_b/ablations/gbdt_w_nbrs_censored/model.json
+            - models/model_b/ablations/gbdt_w_nbrs_censored/state.json
+
+    train_model_b_gbdt_w_nbrs_count_only:
+        cmd: uv run -m plb.model_b.ablations.train gbdt_w_nbrs_count_only
+        deps:
+            - data/interim/lexemes.jsonl
+            - data/processed/model_b/eval_word_instances.jsonl
+            - data/processed/model_b/train_word_instances.jsonl
+            - data/processed/similarities.jsonl
+            - data/processed/word_instances_kvl_predictions.jsonl
+            - data/raw/tubelex/${tubelex.file_name}
+            - src/plb/model_b/ablations/gbdt.py
+            - src/plb/model_b/ablations/registry.py
+            - src/plb/model_b/ablations/train.py
+            - src/plb/model_b/config.py
+            - src/plb/model_b/core/base.py
+            - src/plb/model_b/core/data.py
+            - src/plb/model_b/core/features.py
+            - src/plb/model_b/preparation/create_splits.py
+            - src/plb/tubelex/config.py
+        params:
+            - model_b.ablations.models.gbdt_w_nbrs_count_only
+            - tubelex.file_name
+        outs:
+            - models/model_b/ablations/gbdt_w_nbrs_count_only/model.json
+            - models/model_b/ablations/gbdt_w_nbrs_count_only/state.json
+
+    train_model_b_gbdt_days:
+        cmd: uv run -m plb.model_b.ablations.train gbdt_days
+        deps:
+            - data/interim/lexemes.jsonl
+            - data/processed/model_b/eval_word_instances.jsonl
+            - data/processed/model_b/train_word_instances.jsonl
+            - data/processed/word_instances_kvl_predictions.jsonl
+            - data/raw/tubelex/${tubelex.file_name}
+            - src/plb/model_b/ablations/gbdt.py
+            - src/plb/model_b/ablations/registry.py
+            - src/plb/model_b/ablations/train.py
+            - src/plb/model_b/config.py
+            - src/plb/model_b/core/base.py
+            - src/plb/model_b/core/data.py
+            - src/plb/model_b/core/features.py
+            - src/plb/model_b/preparation/create_splits.py
+            - src/plb/tubelex/config.py
+        params:
+            - model_b.ablations.models.gbdt_days
+            - tubelex.file_name
+        outs:
+            - models/model_b/ablations/gbdt_days/model.json
+            - models/model_b/ablations/gbdt_days/state.json
+
+    train_model_b_st_no_nbrs:
+        cmd: uv run --extra train -m plb.model_b.ablations.train st_no_nbrs
+        deps:
+            - data/interim/lexemes.jsonl
+            - data/processed/model_b/eval_word_instances.jsonl
+            - data/processed/model_b/train_word_instances.jsonl
+            - data/processed/word_instances_kvl_predictions.jsonl
+            - data/raw/tubelex/${tubelex.file_name}
+            - src/plb/model_b/ablations/registry.py
+            - src/plb/model_b/ablations/set_transformer_modules.py
+            - src/plb/model_b/ablations/st.py
+            - src/plb/model_b/ablations/train.py
+            - src/plb/model_b/config.py
+            - src/plb/model_b/core/base.py
+            - src/plb/model_b/core/data.py
+            - src/plb/model_b/core/features.py
+            - src/plb/model_b/preparation/create_splits.py
+            - src/plb/tubelex/config.py
+        params:
+            - model_b.ablations.models.st_no_nbrs
+            - tubelex.file_name
+        outs:
+            - models/model_b/ablations/st_no_nbrs/model.pt
+
+    train_model_b_st_w_nbrs:
+        cmd: uv run --extra train -m plb.model_b.ablations.train st_w_nbrs
+        deps:
+            - data/interim/lexemes.jsonl
+            - data/processed/model_b/eval_word_instances.jsonl
+            - data/processed/model_b/train_word_instances.jsonl
+            - data/processed/similarities.jsonl
+            - data/processed/word_instances_kvl_predictions.jsonl
+            - data/processed/word_instances_w_stability_targets.jsonl
+            - data/raw/tubelex/${tubelex.file_name}
+            - src/plb/model_b/ablations/registry.py
+            - src/plb/model_b/ablations/set_transformer_modules.py
+            - src/plb/model_b/ablations/st.py
+            - src/plb/model_b/ablations/train.py
+            - src/plb/model_b/config.py
+            - src/plb/model_b/core/base.py
+            - src/plb/model_b/core/data.py
+            - src/plb/model_b/core/features.py
+            - src/plb/model_b/preparation/create_splits.py
+            - src/plb/tubelex/config.py
+        params:
+            - model_b.ablations.models.st_w_nbrs
+            - tubelex.file_name
+        outs:
+            - models/model_b/ablations/st_w_nbrs/model.pt
+
+    train_model_b_st_w_nbrs_censored:
+        cmd: uv run --extra train -m plb.model_b.ablations.train st_w_nbrs_censored
+        deps:
+            - data/interim/lexemes.jsonl
+            - data/processed/model_b/eval_word_instances.jsonl
+            - data/processed/model_b/train_word_instances.jsonl
+            - data/processed/similarities.jsonl
+            - data/processed/word_instances_kvl_predictions.jsonl
+            - data/processed/word_instances_w_stability_targets.jsonl
+            - data/raw/tubelex/${tubelex.file_name}
+            - src/plb/model_b/ablations/registry.py
+            - src/plb/model_b/ablations/set_transformer_modules.py
+            - src/plb/model_b/ablations/st.py
+            - src/plb/model_b/ablations/train.py
+            - src/plb/model_b/config.py
+            - src/plb/model_b/core/base.py
+            - src/plb/model_b/core/data.py
+            - src/plb/model_b/core/features.py
+            - src/plb/model_b/preparation/create_splits.py
+            - src/plb/tubelex/config.py
+        params:
+            - model_b.ablations.models.st_w_nbrs_censored
+            - tubelex.file_name
+        outs:
+            - models/model_b/ablations/st_w_nbrs_censored/model.pt
+
+    evaluate_model_b_ablations:
+        cmd: uv run --extra train -m plb.model_b.ablations.evaluate
+        deps:
+            - data/interim/lexemes.jsonl
+            - data/processed/model_b/test_word_instances.jsonl
+            - data/processed/randomities.jsonl
+            - data/processed/similarities.jsonl
+            - data/processed/word_instances_kvl_predictions.jsonl
+            - data/processed/word_instances_w_stability_targets.jsonl
+            - data/raw/tubelex/${tubelex.file_name}
+            - models/model_b/ablations/global_median/model.json
+            - models/model_b/ablations/within_learner_median/model.json
+            - models/model_b/ablations/learner_recent_k_median/model.json
+            - models/model_b/ablations/gbdt_no_nbrs/model.json
+            - models/model_b/ablations/gbdt_no_nbrs/state.json
+            - models/model_b/ablations/gbdt_w_nbrs/model.json
+            - models/model_b/ablations/gbdt_w_nbrs/state.json
+            - models/model_b/ablations/gbdt_w_nbrs_censored/model.json
+            - models/model_b/ablations/gbdt_w_nbrs_censored/state.json
+            - models/model_b/ablations/gbdt_w_nbrs_random/model.json
+            - models/model_b/ablations/gbdt_w_nbrs_random/state.json
+            - models/model_b/ablations/gbdt_w_nbrs_count_only/model.json
+            - models/model_b/ablations/gbdt_w_nbrs_count_only/state.json
+            - models/model_b/ablations/gbdt_days/model.json
+            - models/model_b/ablations/gbdt_days/state.json
+            - models/model_b/ablations/st_no_nbrs/model.pt
+            - models/model_b/ablations/st_w_nbrs/model.pt
+            - models/model_b/ablations/st_w_nbrs_censored/model.pt
+            - src/plb/learners.py
+            - src/plb/model_b/ablations/dummy.py
+            - src/plb/model_b/ablations/evaluate.py
+            - src/plb/model_b/ablations/gbdt.py
+            - src/plb/model_b/ablations/registry.py
+            - src/plb/model_b/ablations/set_transformer_modules.py
+            - src/plb/model_b/ablations/st.py
+            - src/plb/model_b/config.py
+            - src/plb/model_b/core/base.py
+            - src/plb/model_b/core/data.py
+            - src/plb/model_b/core/evaluate.py
+            - src/plb/model_b/core/features.py
+            - src/plb/model_b/preparation/create_splits.py
+            - src/plb/tubelex/config.py
+        params:
+            - model_b.ablations
+            - tubelex.file_name
+        metrics:
+            - evaluations/model_b/ablations/metrics.json:
+                  cache: false
+        outs:
+            - evaluations/model_b/ablations/predictions.csv
+
+    train_model_a:
+        cmd: uv run --extra train -m plb.model_a.kvl.train
+        deps:
+            - data/raw/kvl_bea2026/train
+            - src/plb/model_a/common/config.py
+            - src/plb/model_a/kvl/data.py
+            - src/plb/model_a/common/modeling.py
+            - src/plb/model_a/kvl/train.py
+        params:
+            - params.yaml:
+                  - model_a.model_id
+                  - model_a.model_revision
+                  - model_a.languages
+                  - model_a.epochs
+                  - model_a.batch_size
+                  - model_a.lr
+                  - model_a.seed
+                  - model_a.run_name
+        outs:
+            - models/model_a/${model_a.run_name}
+
+    evaluate_model_a:
+        cmd: uv run --extra train -m plb.model_a.kvl.evaluate
+        deps:
+            - data/raw/kvl_bea2026/dev
+            - models/model_a/${model_a.run_name}
+            - src/plb/model_a/common/config.py
+            - src/plb/model_a/kvl/data.py
+            - src/plb/model_a/common/modeling.py
+            - src/plb/model_a/kvl/evaluate.py
+        params:
+            - params.yaml:
+                  - model_a.languages
+                  - model_a.batch_size
+                  - model_a.run_name
+        metrics:
+            - evaluations/model_a/${model_a.run_name}/dev/metrics.json:
+                  cache: false
+        outs:
+            - evaluations/model_a/${model_a.run_name}/dev/predictions.csv
+            - evaluations/model_a/${model_a.run_name}/dev/calibration.png
+
+    evaluate_model_a_test:
+        cmd: MODEL_A_EVAL_SPLIT=test uv run --extra train -m plb.model_a.kvl.evaluate
+        deps:
+            - data/raw/kvl_bea2026/test
+            - models/model_a/${model_a.run_name}
+            - src/plb/model_a/common/config.py
+            - src/plb/model_a/kvl/data.py
+            - src/plb/model_a/common/modeling.py
+            - src/plb/model_a/kvl/evaluate.py
+        params:
+            - params.yaml:
+                  - model_a.languages
+                  - model_a.batch_size
+                  - model_a.run_name
+        metrics:
+            - evaluations/model_a/${model_a.run_name}/test/metrics.json:
+                  cache: false
+        outs:
+            - evaluations/model_a/${model_a.run_name}/test/predictions.csv
+            - evaluations/model_a/${model_a.run_name}/test/calibration.png
+
+    precompute_model_a_predictions:
+        cmd: uv run --extra train -m plb.model_a.precompute.precompute_predictions
+        deps:
+            - data/interim/word_instances.jsonl
+            - data/interim/lexemes.jsonl
+            - data/interim/decks.jsonl
+            - data/interim/users.jsonl
+            - models/model_a/${model_a.run_name}
+            - src/plb/model_a/common/config.py
+            - src/plb/model_a/common/inference.py
+            - src/plb/model_a/common/modeling.py
+            - src/plb/model_a/kvl/data.py
+            - src/plb/model_a/precompute/precompute_predictions.py
+        params:
+            - params.yaml:
+                  - model_a.run_name
+                  - model_a.precompute
+        outs:
+            - ${model_a.precompute.output_path}
+
+    augment_model_a_multils:
+        cmd: uv run --extra augment -m plb.model_a.multils.augment
+        deps:
+            - data/raw/multils_japanese
+            - src/plb/model_a/multils/augment.py
+            - src/plb/model_a/common/config.py
+            - src/plb/model_a/multils/augmentation.py
+            - src/plb/model_a/multils/cues.py
+            - src/plb/model_a/multils/data.py
+        params:
+            - model_a.multils.augmentation
+            - model_a.multils.cues_path
+        outs:
+            - data/interim/model_a/multils_l1_cues.checkpoint.jsonl:
+                  persist: true
+            - data/interim/model_a/multils_l1_cues.tsv
+            - data/interim/model_a/multils_l1_cues_quarantine.tsv
+        frozen: true
+
+    evaluate_model_a_multils_fine_tuned:
+        cmd: uv run --extra train -m plb.model_a.multils.evaluate_fine_tuned
+        deps:
+            - data/raw/multils_japanese
+            - data/interim/model_a/multils_l1_cues.tsv
+            - models/model_a/${model_a.run_name}
+            - src/plb/model_a/common/config.py
+            - src/plb/model_a/common/inference.py
+            - src/plb/model_a/kvl/data.py
+            - src/plb/model_a/common/modeling.py
+            - src/plb/model_a/multils/evaluation.py
+            - src/plb/model_a/multils/cues.py
+            - src/plb/model_a/multils/data.py
+            - src/plb/model_a/multils/metrics.py
+            - src/plb/model_a/multils/prompts.py
+            - src/plb/model_a/multils/evaluate_fine_tuned.py
+        params:
+            - params.yaml:
+                  - model_a.batch_size
+                  - model_a.run_name
+                  - model_a.multils.condition
+                  - model_a.multils.cues_path
+                  - model_a.multils.bootstrap_samples
+                  - model_a.multils.bootstrap_seed
+        metrics:
+            - evaluations/model_a/${model_a.run_name}/multils_japanese/fine_tuned/metrics.json:
+                  cache: false
+        outs:
+            - evaluations/model_a/${model_a.run_name}/multils_japanese/fine_tuned/predictions_inference.csv
+            - evaluations/model_a/${model_a.run_name}/multils_japanese/fine_tuned/predictions_per_annotator.csv
+            - evaluations/model_a/${model_a.run_name}/multils_japanese/fine_tuned/predictions_item_macro.csv
+            - evaluations/model_a/${model_a.run_name}/multils_japanese/fine_tuned/predictions_per_l1_item.csv
+            - evaluations/model_a/${model_a.run_name}/multils_japanese/fine_tuned/calibration.png
+
+    evaluate_model_a_multils_base:
+        cmd: uv run --extra train -m plb.model_a.multils.evaluate_zero_shot
+        deps:
+            - data/raw/multils_japanese
+            - data/interim/model_a/multils_l1_cues.tsv
+            - src/plb/model_a/common/config.py
+            - src/plb/model_a/common/inference.py
+            - src/plb/model_a/kvl/data.py
+            - src/plb/model_a/common/modeling.py
+            - src/plb/model_a/multils/evaluation.py
+            - src/plb/model_a/multils/cues.py
+            - src/plb/model_a/multils/data.py
+            - src/plb/model_a/multils/metrics.py
+            - src/plb/model_a/multils/prompts.py
+            - src/plb/model_a/multils/evaluate_zero_shot.py
+        params:
+            - params.yaml:
+                  - model_a.model_id
+                  - model_a.model_revision
+                  - model_a.batch_size
+                  - model_a.run_name
+                  - model_a.multils.condition
+                  - model_a.multils.cues_path
+                  - model_a.multils.bootstrap_samples
+                  - model_a.multils.bootstrap_seed
+        metrics:
+            - evaluations/model_a/${model_a.run_name}/multils_japanese/base/metrics.json:
+                  cache: false
+        outs:
+            - evaluations/model_a/${model_a.run_name}/multils_japanese/base/predictions_inference.csv
+            - evaluations/model_a/${model_a.run_name}/multils_japanese/base/predictions_per_annotator.csv
+            - evaluations/model_a/${model_a.run_name}/multils_japanese/base/predictions_item_macro.csv
+            - evaluations/model_a/${model_a.run_name}/multils_japanese/base/predictions_per_l1_item.csv
+            - evaluations/model_a/${model_a.run_name}/multils_japanese/base/calibration.png
+
+    compare_model_a_multils:
+        cmd: uv run --extra train -m plb.model_a.multils.compare
+        deps:
+            - evaluations/model_a/${model_a.run_name}/multils_japanese/fine_tuned/predictions_per_annotator.csv
+            - evaluations/model_a/${model_a.run_name}/multils_japanese/base/predictions_per_annotator.csv
+            - src/plb/model_a/multils/compare.py
+            - src/plb/model_a/common/config.py
+            - src/plb/model_a/multils/metrics.py
+        params:
+            - params.yaml:
+                  - model_a.run_name
+                  - model_a.multils.condition
+                  - model_a.multils.bootstrap_samples
+                  - model_a.multils.bootstrap_seed
+        metrics:
+            - evaluations/model_a/${model_a.run_name}/multils_japanese/comparison/metrics.json:
+                  cache: false
+        outs:
+            - evaluations/model_a/${model_a.run_name}/multils_japanese/comparison/predictions_item_macro_comparison.csv
+
+    evaluate_tubelex:
+        cmd: uv run -m plb.tubelex.evaluate
+        deps:
+            - data/raw/tubelex
+            - data/raw/multils_japanese/annotations/agg_original_test.tsv
+            - src/plb/tubelex/config.py
+            - src/plb/tubelex/evaluate.py
+        params:
+            - tubelex.file_name
+        metrics:
+            - evaluations/tubelex/metrics.json:
+                  cache: false

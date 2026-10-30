@@ -1,0 +1,210 @@
+model_a:
+  model_id: jhu-clsp/mmBERT-base
+  model_revision: c5955035435e2bf121cde7f3c8863ef52ff35d82
+  languages:
+    - es
+    - de
+    - zh
+  epochs: 16
+  batch_size: 8
+  lr: 3.0e-5
+  seed: 42
+  run_name: baseline
+  multils:
+    condition: full_l2_deploy
+    cues_path: data/interim/model_a/multils_l1_cues.tsv
+    bootstrap_samples: 2000
+    bootstrap_seed: 42
+    augmentation:
+      model: gpt-5.6-terra
+      prompt_version: v2
+      reasoning_effort: medium
+  precompute:
+    word_instances_path: data/interim/word_instances.jsonl
+    output_path: data/processed/word_instances_kvl_predictions.jsonl
+    batch_size: 32
+    max_batch_tokens: 4096
+embeddings:
+  direct:
+    model_id: intfloat/multilingual-e5-base
+    model_revision: d128750597153bb5987e10b1c3493a34e5a4502a
+    batch_size: 64
+    max_length: 512
+    word_instances_path: data/interim/word_instances.jsonl
+    output_path: data/processed/embeddings/word_instance_embeddings_direct.jsonl
+cohort:
+  # The learners this study analyses. L04 and L05 are excluded; L06 is kept for
+  # training only, since 480 labelled rows cannot support a per-learner test metric.
+  learners: [L01, L02, L03, L06]
+  train_only: [L06]
+model_b:
+  splits:
+    # Lexemes every test-eligible learner has studied, held out for all of them, so
+    # cross-learner performance is compared on identical items.
+    shared_test_lexemes: 250
+    test_fraction: 0.15
+    eval_fraction: 0.15
+    seed: 42
+  ablations:
+    bootstrap_samples: 1000
+    bootstrap_seed: 42
+    # RER and delta-RER are read against this model's per-learner log-MAE.
+    baseline: within_learner_median
+    delta_pairs:
+      - [global_median, within_learner_median]
+      - [learner_recent_k_median, within_learner_median]
+      - [gbdt_no_nbrs, within_learner_median]
+      - [gbdt_w_nbrs, gbdt_no_nbrs]
+      - [gbdt_w_nbrs_censored, gbdt_w_nbrs]
+      - [gbdt_w_nbrs, gbdt_w_nbrs_random]
+      - [gbdt_w_nbrs_count_only, gbdt_no_nbrs]
+      - [gbdt_w_nbrs_count_only, gbdt_w_nbrs]
+      - [gbdt_days, gbdt_no_nbrs]
+      - [gbdt_days, gbdt_w_nbrs_count_only]
+      - [gbdt_days, gbdt_w_nbrs]
+      - [gbdt_w_nbrs, learner_recent_k_median]
+      - [gbdt_w_nbrs_censored, learner_recent_k_median]
+      - [gbdt_w_nbrs_censored, gbdt_no_nbrs]
+      - [st_w_nbrs_censored, st_no_nbrs]
+      - [st_no_nbrs, within_learner_median]
+      - [st_no_nbrs, gbdt_no_nbrs]
+      - [st_w_nbrs, st_no_nbrs]
+      - [st_w_nbrs_censored, st_w_nbrs]
+      - [st_w_nbrs, gbdt_w_nbrs]
+    models:
+      global_median:
+        type: global
+      within_learner_median:
+        type: within
+      learner_recent_k_median:
+        type: recent
+        k: 20 # placeholder; tune on the eval split later
+      gbdt_no_nbrs:
+        include_nbrs: false
+        seed: 42
+        early_stopping_rounds: 50
+        xgb:
+          max_depth: 4
+          learning_rate: 0.05
+          n_estimators: 2000
+          min_child_weight: 10
+          subsample: 0.8
+          colsample_bytree: 0.8
+      gbdt_w_nbrs:
+        include_nbrs: true
+        seed: 42
+        early_stopping_rounds: 50
+        xgb:
+          max_depth: 4
+          learning_rate: 0.05
+          n_estimators: 2000
+          min_child_weight: 10
+          subsample: 0.8
+          colsample_bytree: 0.8
+      gbdt_w_nbrs_random:
+        # Same data and hyperparameters as gbdt_w_nbrs; only the neighbor file
+        # differs, so the delta isolates similarity from temporal drift.
+        include_nbrs: true
+        neighbors_source: random
+        seed: 42
+        early_stopping_rounds: 50
+        xgb:
+          max_depth: 4
+          learning_rate: 0.05
+          n_estimators: 2000
+          min_child_weight: 10
+          subsample: 0.8
+          colsample_bytree: 0.8
+      gbdt_w_nbrs_count_only:
+        # Same neighbors as gbdt_w_nbrs, but only their COUNT reaches the model, so the
+        # delta isolates neighborhood size from neighbor burden/stability/difficulty.
+        include_nbrs: true
+        nbr_features: count
+        seed: 42
+        early_stopping_rounds: 50
+        xgb:
+          max_depth: 4
+          learning_rate: 0.05
+          n_estimators: 2000
+          min_child_weight: 10
+          subsample: 0.8
+          colsample_bytree: 0.8
+      gbdt_w_nbrs_censored:
+        include_nbrs: true
+        include_censored: true
+        seed: 42
+        early_stopping_rounds: 50
+        xgb:
+          max_depth: 4
+          learning_rate: 0.05
+          n_estimators: 2000
+          min_child_weight: 10
+          subsample: 0.8
+          colsample_bytree: 0.8
+      gbdt_days:
+        # Drops the neighborhood entirely and gives the model the target's own
+        # position on the learner's timeline instead, testing whether the
+        # neighbor count was only ever a noisy reading of elapsed time.
+        include_nbrs: false
+        include_days: true
+        seed: 42
+        early_stopping_rounds: 50
+        xgb:
+          max_depth: 4
+          learning_rate: 0.05
+          n_estimators: 2000
+          min_child_weight: 10
+          subsample: 0.8
+          colsample_bytree: 0.8
+      st_no_nbrs:
+        include_nbrs: false
+        seed: 42
+        epochs: 100
+        batch_size: 128
+        learning_rate: 1.0e-3
+        weight_decay: 1.0e-4
+        patience: 10
+        dim: 64
+        num_heads: 4
+      st_w_nbrs:
+        include_nbrs: true
+        seed: 42
+        epochs: 100
+        batch_size: 128
+        learning_rate: 1.0e-3
+        weight_decay: 1.0e-4
+        patience: 10
+        dim: 64
+        num_heads: 4
+      st_w_nbrs_censored:
+        include_nbrs: true
+        include_censored: true
+        seed: 42
+        epochs: 100
+        batch_size: 128
+        learning_rate: 1.0e-3
+        weight_decay: 1.0e-4
+        patience: 10
+        dim: 64
+        num_heads: 4
+similarities:
+  percentiles:
+    semantic: 0.998
+    phonological: 0.998
+    morphological: 0.998
+    ortho_stroke: 0.998
+    ortho_kana: 0.998
+  calibration:
+    sample_pairs: 50000
+    seed: 42
+    output_path: data/processed/similarity_null_calibration.json
+  cache:
+    # Raw per-pair channel scores. Written once by score_similarity_pairs (~1.5h) and
+    # read by every selection run, so retuning percentiles never re-scores.
+    path: data/processed/similarity_scores
+  top_k: 30
+  workers: 20
+  target_chunk_size: 8
+  embeddings_path: data/processed/embeddings/word_instance_embeddings_direct.jsonl
+tubelex:
+  file_name: ja_lemma_pos.tsv

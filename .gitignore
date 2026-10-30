@@ -1,0 +1,29 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+node_modules
+.idea
+
+/docs/*
+!/docs/decisions
+
+# Virtual environments
+.venv
+.env
+
+# DVC-managed Model A augmentation and evaluation artifacts
+# /data/interim/model_a/multils_l1_cues*
+# /evaluations/model_a/baseline/multils_japanese/fine_tuned/
+# /evaluations/model_a/baseline/multils_japanese/base/
+# /evaluations/model_a/baseline/multils_japanese/comparison/
+
+# Downloaded datasets (see "Data" in README.md)
+/data/raw/*
+/data/release/
+
+# marimo output caches
+__marimo__/

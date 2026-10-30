@@ -1,0 +1,9 @@
+{
+  "meta": {
+    "file_name": "ja_lemma_pos.tsv",
+    "processed_items": 242,
+    "all_items": 570
+  },
+  "group_group_corr": -0.6696689536196089,
+  "indiv_group_corr": -0.17006610088477658
+}

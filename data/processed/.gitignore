@@ -1,0 +1,10 @@
+/clean_reviews.jsonl
+/clean_reviews_w_fsrs.jsonl
+/word_instances_w_stability_targets.jsonl
+/similarities.jsonl
+/model_b/train_word_instances.jsonl
+/model_b/test_word_instances.jsonl
+/word_instances_kvl_predictions.jsonl
+/similarity_scores
+/similarity_null_calibration.json
+/randomities.jsonl
